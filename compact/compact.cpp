@@ -5,19 +5,25 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
-#include <complex>
+#include <unistd.h>
 
 int pred(int value, unsigned int index) {
-  return value * value;
+  usleep(1 * 100);
+  return index % 2 == 0 ? value : 0;
 }
 
-void map(int (*predicate)(int, unsigned int), int *data, int *result, unsigned int len) {
+void map(
+    int (*predicate)(int, unsigned int),
+    int *data,
+    int *result,
+    unsigned int len,
+    unsigned int start_index) {
   for (unsigned int i = 0; i < len; ++i) {
-    result[i] = predicate(data[i], i);
+    result[i] = predicate(data[i], start_index + i);
   }
 }
 
-void parallel_map(
+void parallel_compact(
     int (*predicate)(int, unsigned int),
     int *data,
     int *result,
@@ -25,7 +31,7 @@ void parallel_map(
     unsigned int number_of_processors,
     unsigned int own_rank) {
   if (own_rank == 0) {
-    unsigned int sublen = (len / number_of_processors) + (len % number_of_processors);
+    unsigned int sublen = (len / number_of_processors) + (len % number_of_processors > 0 ? 1 : 0);
     unsigned int i = 0;
 
     bool is_remainder = len % sublen > 0;
@@ -38,15 +44,33 @@ void parallel_map(
       MPI_Send(info, 2, MPI_UNSIGNED, i + 1, 0, MPI_COMM_WORLD);
     }
 
+    int *subresult = &result[i * sublen];
+
     unsigned int remaining_len = is_remainder ? (len % sublen) : sublen;
-    map(predicate, &data[i * sublen], &result[i * sublen], remaining_len);
+    map(predicate, &data[i * sublen], subresult, remaining_len, i * sublen);
 
-    int *child_result = (int *)malloc(sublen * sizeof(int));
-
-    for (i = 0; i < child_parts; ++i) {
-      MPI_Recv(child_result, sublen, MPI_INT, i + 1, 0, MPI_COMM_WORLD, NULL);
-      memcpy(&result[i * sublen], child_result, sublen * sizeof(int));
+    unsigned int compact_len = 0;
+    for (unsigned int j = 0; j < remaining_len; ++j) {
+      if (subresult[j] > 0) {
+        subresult[compact_len++] = subresult[j];
+      }
     }
+
+    int *child_result = (int *)malloc(sizeof(int) * sublen);
+    unsigned int len_so_far = 0;
+    for (i = 0; i < child_parts; ++i) {
+      unsigned int child_len;
+      MPI_Recv(&child_len, 1, MPI_UNSIGNED, i + 1, 0, MPI_COMM_WORLD, NULL);
+      MPI_Recv(child_result, child_len, MPI_INT, i + 1, 0, MPI_COMM_WORLD, NULL);
+
+      memcpy(&result[len_so_far], child_result, child_len * sizeof(int));
+
+      len_so_far += child_len;
+    }
+
+    memcpy(&result[len_so_far], subresult, compact_len * sizeof(int));
+
+    memset((void *)&result[len_so_far + compact_len], 0, (size_t)(len - (len_so_far + compact_len)) * sizeof(int));
   } else {
     unsigned int info[2];
     MPI_Recv(info, 2, MPI_UNSIGNED, 0, 0, MPI_COMM_WORLD, NULL);
@@ -54,9 +78,19 @@ void parallel_map(
     unsigned int i = info[0];
     unsigned int sublen = info[1];
 
-    map(predicate, &data[i * sublen], &result[i * sublen], sublen);
+    int *subresult = &result[i * sublen];
 
-    MPI_Send(&result[i * sublen], sublen, MPI_INT, i, 0, MPI_COMM_WORLD);
+    map(predicate, &data[i * sublen], subresult, sublen, i * sublen);
+
+    unsigned int compact_len = 0;
+    for (unsigned int j = 0; j < sublen; ++j) {
+      if (subresult[j] > 0) {
+        subresult[compact_len++] = subresult[j];
+      }
+    }
+
+    MPI_Send(&compact_len, 1, MPI_UNSIGNED, i, 0, MPI_COMM_WORLD);
+    MPI_Send(subresult, compact_len, MPI_INT, i, 0, MPI_COMM_WORLD);
   }
 }
 
@@ -68,128 +102,17 @@ int main() {
   MPI_Comm_rank(MPI_COMM_WORLD, &own_rank);
   MPI_Comm_size(MPI_COMM_WORLD, &number_of_processors);
 
-  int len = 6;
-  int data[6] = { 1, 2, 3, 4, 5, 6 };
+  int len = 10000;
+  int *data = (int *)malloc(len * sizeof(int));
+
+  for (unsigned int i = 0; i < len; ++i) {
+    data[i] = i + 1;
+  }
+
   int *result = (int *)malloc(len * sizeof(int));
 
-  parallel_map(pred, data, result, len, number_of_processors, own_rank);
+  parallel_compact(pred, data, result, len, number_of_processors, own_rank);
 
-  if (own_rank == 0) {
-    for (int i = 0; i < len; ++i) {
-      printf("val %d: %d\n", i + 1, result[i]);
-    }
-  }
-
-  /*unsigned int interval = domainHeight / number_of_processors;
-  unsigned char *data;
-  unsigned int *blocks;
-
-  const unsigned int maxIterations = 100;
-
-  unsigned int start = 0;
-  unsigned int end = domainHeight;
-  unsigned int block_count = 0;
-
-  if (own_rank == 0) {
-    data = new unsigned char[domainWidth * domainHeight * 3];
-    std::memset(data, 0, domainWidth * domainHeight * 3 * sizeof(unsigned char));
-
-    for (int i = 1; i < number_of_processors; ++i) {
-      unsigned int bounds[2];
-      bounds[0] = i * interval;
-      bounds[1] = bounds[0] + interval;
-      MPI_Send(bounds, 2, MPI_UNSIGNED, i, 0, MPI_COMM_WORLD);
-    }
-    end = interval;
-  } else {
-    unsigned int bounds[2];
-    MPI_Recv(bounds, 2, MPI_UNSIGNED, 0, 0, MPI_COMM_WORLD, NULL);
-
-    start = bounds[0];
-    end = bounds[1];
-
-    blocks = new unsigned int[domainWidth * interval];
-  }
-
-  printf("%u, %u\n", start, end);
-  for (unsigned int y = start; y < end; ++y)
-  {
-    for (unsigned int x = 0; x < domainWidth; ++x)
-    {
-      std::complex<double> c(x / (double)domainWidth * scale + center.real(),
-      y / (double)domainHeight * scale + center.imag());
-
-      std::complex<double> z(c);
-      for (unsigned int iteration = 0; iteration < maxIterations; ++iteration)
-      {
-        z = z * z + c;
-        if (std::abs(z) > 1.0f)
-        {
-          unsigned int index = x + y * domainWidth;
-
-          if (own_rank > 0){
-            if (block_count == 0)
-            {
-              blocks[0] = index;
-              blocks[1] = index;
-              block_count++;
-            }
-            else if (blocks[2*block_count - 1] == index - 1 || blocks[2*block_count - 1] == index)
-            {
-              blocks[2*block_count - 1] = index;
-            }
-            else
-            {
-              blocks[2*block_count] = index;
-              blocks[2*block_count + 1] = index;
-              block_count++;
-            }
-          }
-          else
-          {
-            data[(x + y * domainWidth) * 3 + 0] = 255;
-            data[(x + y * domainWidth) * 3 + 1] = 255;
-            data[(x + y * domainWidth) * 3 + 2] = 255;
-          }
-        }
-      }
-    }
-  }
-  if (own_rank > 0) {
-    MPI_Send(&block_count, 1, MPI_UNSIGNED, 0, 0, MPI_COMM_WORLD);
-    MPI_Send(blocks, 2 * block_count, MPI_UNSIGNED, 0, 0, MPI_COMM_WORLD);
-    delete[] blocks;
-  }
-
-  if (own_rank == 0) {
-    for (unsigned int i = 1; i < number_of_processors; ++i)
-    {
-      unsigned int *data2 = new unsigned int[domainWidth * interval];
-      unsigned int block_count;
-      MPI_Recv(&block_count, 1, MPI_UNSIGNED, i, 0, MPI_COMM_WORLD, NULL);
-      MPI_Recv(data2, 2 * block_count, MPI_UNSIGNED, i, 0, MPI_COMM_WORLD, NULL);
-
-      start = i * interval;
-      end = start + interval;
-
-      for (unsigned int y = 0; y < block_count; y++)
-      {
-        for (unsigned int x = data2[2*y]; x < data2[2*y+1] + 1; x++)
-        {
-          data[3 * x + 0] = 255;
-          data[3 * x + 1] = 255;
-          data[3 * x + 2] = 255;
-        }
-      }
-
-      delete[] data2;
-    }
-    WriteTGA_RGB("mandelbrot.tga", data, domainWidth, domainHeight);
-  }
-
-  if (own_rank == 0){
-    delete[] data;
-  }*/
   MPI_Finalize();
 
   return 0;
