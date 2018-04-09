@@ -15,11 +15,11 @@ public:
 
   bool isSolved();
   bool isAllowed(char val, int x, int y);
-  bool solveBackTrack();
+  bool solveBackTrack(int own_rank, int number_of_processors);
+  bool solveBackTrackParallel();
 
   void set(char val, int x, int y);
 
-private:
   char data[9][9];
 };
 

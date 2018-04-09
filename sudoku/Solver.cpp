@@ -1,6 +1,6 @@
 #include "Solver.h"
 
-
+#include <mpi.h>
 
 Solver::Solver()
 {
@@ -89,48 +89,112 @@ bool Solver::isAllowed(char val, int x, int y)
   return allowed;
 }
 
-bool Solver::solveBackTrack()
+bool Solver::solveBackTrack(int own_rank, int number_of_processors)
 {
   // K�szen vagyunk?
   if (isSolved())
   {
+    printf("ISSOLVED %d\n", own_rank);
+    print(std::cout);
     return true;
   }
 
-  // Keress�nk egy poz�ci�t, amely m�g nincs kit�ltve
   for (int y = 0; y < 9; ++y)
   {
     for (int x = 0; x < 9; ++x)
     {
-      // Nincs m�g kit�ltve?
       if (data[y][x] == 0)
       {
-        // Keress�nk egy �rt�ket, amely megfelel a szab�lyoknak
         for (int n = 1; n <= 9; ++n)
         {
-          // Be�rhat� az adott poz�ci�ba?
           if (isAllowed(n, x, y))
           {
-            // M�soljuk le a t�bl�t
             Solver tmpSolver(this);
-            // �rjuk bele az �j �rt�ket
             tmpSolver.set(n, x, y);
-            // Pr�b�ljuk megoldani az �j t�bl�t
-            if (tmpSolver.solveBackTrack())
+
+            int flag = 0;
+            for (int i = 0; i < number_of_processors; ++i)
             {
-              // Megold�s
-              *this = tmpSolver;
-              return true;
+              if (i != own_rank)
+              {
+                MPI_Iprobe(i, 0, MPI_COMM_WORLD, &flag, NULL);
+
+                if (flag)
+                {
+                  int signal;
+                  MPI_Recv(&signal, 1, MPI_INT, i, 0, MPI_COMM_WORLD, NULL);
+                  MPI_Send(tmpSolver.data, 9 * 9, MPI_CHAR, i, 0, MPI_COMM_WORLD);
+                  printf("sent stuff %d\n", i);
+                  break;
+                }
+              }
+            }
+
+            if (!flag)
+            {
+              if (tmpSolver.solveBackTrack(own_rank, number_of_processors))
+              {
+                *this = tmpSolver;
+                return true;
+              }
             }
           }
         }
       }
       // Nem tudtunk �rt�ket �rni a cell�ba, �gy l�pj�nk vissza
-      if (data[y][x] == 0) return false;
+      if (data[y][x] == 0) {
+        return false;
+      }
     }
   }
 
+  if (own_rank == 0) {
+    printf("not solving on master!\n");
+  }
+
   return false;
+}
+
+bool Solver::solveBackTrackParallel()
+{
+  int own_rank;
+  int number_of_processors;
+
+  MPI_Comm_rank(MPI_COMM_WORLD, &own_rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &number_of_processors);
+
+  if (own_rank == 0) {
+    solveBackTrack(own_rank, number_of_processors);
+  } else {
+    Solver solver;
+
+    while (true) {
+      MPI_Request reqs[number_of_processors];
+      for (int i = 0; i < number_of_processors; ++i) {
+        if (i != own_rank) {
+          int signal = 1;
+          MPI_Isend(&signal, 1, MPI_INT, i, 0, MPI_COMM_WORLD, &reqs[i]);
+        }
+      }
+
+      // printf("sent signals, waiting for msg %d\n", own_rank);
+
+      MPI_Recv(solver.data, 9 * 9, MPI_CHAR, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, NULL);
+
+      // printf("received data %d\n", own_rank);
+
+      for (int i = 0; i < number_of_processors; ++i) {
+        if (i != own_rank) {
+          int signal = 1;
+          MPI_Cancel(&reqs[i]);
+        }
+      }
+
+      solver.solveBackTrack(own_rank, number_of_processors);
+    }
+  }
+
+  return true;
 }
 
 void Solver::set(char val, int x, int y)
