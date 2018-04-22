@@ -53,7 +53,6 @@ void Solver::print(std::ostream & s)
 
 bool Solver::isSolved()
 {
-  // Minden cella ki van t�ltve a t�bl�ban?
   for (int y = 0; y < 9; ++y)
   {
     for (int x = 0; x < 9; ++x)
@@ -89,67 +88,47 @@ bool Solver::isAllowed(char val, int x, int y)
   return allowed;
 }
 
-bool Solver::solveBackTrack(int own_rank, int number_of_processors)
-{
-  // K�szen vagyunk?
-  if (isSolved())
-  {
-    printf("ISSOLVED %d\n", own_rank);
-    print(std::cout);
+bool Solver::solveBackTrack(int own_rank, int number_of_processors, int children_available) {
+  if (isSolved()) {
     return true;
   }
 
-  for (int y = 0; y < 9; ++y)
-  {
-    for (int x = 0; x < 9; ++x)
-    {
-      if (data[y][x] == 0)
-      {
-        for (int n = 1; n <= 9; ++n)
-        {
-          if (isAllowed(n, x, y))
-          {
+  for (int y = 0; y < 9; ++y) {
+    for (int x = 0; x < 9; ++x) {
+      if (data[y][x] == 0) {
+        for (int n = 1; n <= 9; ++n) {
+          int flag;
+          MPI_Iprobe(MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &flag, NULL);
+
+          if (flag) {
+            if (own_rank == 0) {
+              MPI_Recv(data, 9 * 9, MPI_CHAR, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, NULL);
+              return true;
+            }
+
+            return false;
+          }
+
+          if (isAllowed(n, x, y)) {
             Solver tmpSolver(this);
             tmpSolver.set(n, x, y);
 
-            int flag = 0;
-            for (int i = 0; i < number_of_processors; ++i)
-            {
-              if (i != own_rank)
-              {
-                MPI_Iprobe(i, 0, MPI_COMM_WORLD, &flag, NULL);
-
-                if (flag)
-                {
-                  int signal;
-                  MPI_Recv(&signal, 1, MPI_INT, i, 0, MPI_COMM_WORLD, NULL);
-                  MPI_Send(tmpSolver.data, 9 * 9, MPI_CHAR, i, 0, MPI_COMM_WORLD);
-                  printf("sent stuff %d\n", i);
-                  break;
-                }
-              }
+            if (children_available > 0) {
+              MPI_Send(tmpSolver.data, 9 * 9, MPI_CHAR, children_available, 0, MPI_COMM_WORLD);
+              children_available--;
             }
-
-            if (!flag)
-            {
-              if (tmpSolver.solveBackTrack(own_rank, number_of_processors))
-              {
-                *this = tmpSolver;
-                return true;
-              }
+            else if (tmpSolver.solveBackTrack(own_rank, number_of_processors, children_available)) {
+              *this = tmpSolver;
+              return true;
             }
           }
         }
       }
-      // Nem tudtunk �rt�ket �rni a cell�ba, �gy l�pj�nk vissza
+
       if (data[y][x] == 0) {
         return false;
       }
     }
-  }
-
-  if (own_rank == 0) {
-    printf("not solving on master!\n");
   }
 
   return false;
@@ -164,33 +143,19 @@ bool Solver::solveBackTrackParallel()
   MPI_Comm_size(MPI_COMM_WORLD, &number_of_processors);
 
   if (own_rank == 0) {
-    solveBackTrack(own_rank, number_of_processors);
+    if (!solveBackTrack(own_rank, number_of_processors, number_of_processors - 1)) {
+      MPI_Recv(data, 9 * 9, MPI_CHAR, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, NULL);
+    }
   } else {
     Solver solver;
+    MPI_Recv(solver.data, 9 * 9, MPI_CHAR, 0, 0, MPI_COMM_WORLD, NULL);
 
-    while (true) {
-      MPI_Request reqs[number_of_processors];
+    if (solver.solveBackTrack(own_rank, number_of_processors, 0)) {
       for (int i = 0; i < number_of_processors; ++i) {
         if (i != own_rank) {
-          int signal = 1;
-          MPI_Isend(&signal, 1, MPI_INT, i, 0, MPI_COMM_WORLD, &reqs[i]);
+          MPI_Send(solver.data, 9 * 9, MPI_CHAR, i, 0, MPI_COMM_WORLD);
         }
       }
-
-      // printf("sent signals, waiting for msg %d\n", own_rank);
-
-      MPI_Recv(solver.data, 9 * 9, MPI_CHAR, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, NULL);
-
-      // printf("received data %d\n", own_rank);
-
-      for (int i = 0; i < number_of_processors; ++i) {
-        if (i != own_rank) {
-          int signal = 1;
-          MPI_Cancel(&reqs[i]);
-        }
-      }
-
-      solver.solveBackTrack(own_rank, number_of_processors);
     }
   }
 
